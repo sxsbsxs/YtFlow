@@ -13,6 +13,7 @@ YtFlow combines an IDM-inspired web interface with a Python/FastAPI backend and 
 - Extract audio to MP3, M4A, WAV, or Opus (FFmpeg required).
 - Download playlists when explicitly selected.
 - Live queue status, percentage, transfer speed, and ETA.
+- Persistent SQLite task history; tasks interrupted by a server restart are kept and can be retried.
 - Cancel active jobs and retry failed/cancelled jobs.
 - Downloaded-file browser with persistent storage.
 - Dark/light interface themes.
@@ -70,7 +71,7 @@ docker compose up -d --build
 
 ### 5. Back up downloads and TLS state
 
-Back up Docker volumes `ytflow-downloads`, `caddy-data`, and `caddy-config`. Keep a separate secure backup of `.env`; losing `YTFLOW_SECRET_KEY` invalidates existing sessions.
+Back up Docker volumes `ytflow-downloads`, `caddy-data`, and `caddy-config`. The hidden `.ytflow.sqlite3` database is stored inside `ytflow-downloads` alongside media. Keep a separate secure backup of `.env`; losing `YTFLOW_SECRET_KEY` invalidates existing sessions.
 
 ## Local development
 
@@ -134,7 +135,7 @@ python -m pytest -q
 - The app has one shared administrator account, not multi-user accounts or role-based access.
 - Login failures are throttled per client address in the application process. For high-exposure deployments, also configure provider-level or reverse-proxy rate limiting.
 - YtFlow accepts HTTP(S) URLs and rejects obvious local/private IP literals. This is not a complete SSRF defense against DNS rebinding or malicious redirects. Restrict outbound network access at the host/firewall layer if the service will be used by untrusted users.
-- Download job metadata is currently held in memory and is cleared when the app restarts. Downloaded media persists in its Docker volume.
+- Download job metadata is stored in a hidden SQLite database inside the download directory. Task history therefore survives application restarts. Jobs that were queued or running when the process stopped are marked failed on next startup and can be retried; an interrupted media transfer may resume when the source server supports it.
 - Do not expose the app directly to the internet or disable authentication.
 
 ## License

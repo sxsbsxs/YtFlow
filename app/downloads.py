@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
+import sqlite3
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -27,6 +29,8 @@ QUALITY_FORMATS = {
     "360p": "bestvideo[height<=360]+bestaudio/best[height<=360]",
 }
 AUDIO_FORMATS = {"mp3", "m4a", "wav", "opus"}
+ACTIVE_STATUSES = {"queued", "downloading", "processing"}
+TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
 
 def validate_media_url(value: str) -> str:
@@ -94,11 +98,57 @@ def build_ydl_options(
 
 
 class DownloadManager:
-    def __init__(self, workers: int = 2) -> None:
+    """Threaded yt-dlp queue with a small SQLite-backed persistent task history."""
+
+    def __init__(self, workers: int = 2, db_path: Path | str | None = None) -> None:
         self._executor = ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="ytflow")
         self._lock = threading.RLock()
         self._jobs: dict[str, dict[str, Any]] = {}
         self._cancel: dict[str, threading.Event] = {}
+        self._db_path = Path(db_path) if db_path else DOWNLOAD_DIR / ".ytflow.sqlite3"
+        self._db_path.expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+        self._db = sqlite3.connect(str(self._db_path), check_same_thread=False, timeout=30)
+        with self._lock:
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA synchronous=NORMAL")
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS jobs ("
+                "id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)"
+            )
+            self._db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at)")
+            self._db.commit()
+            self._restore_locked()
+
+    def _persist_locked(self, job: dict[str, Any]) -> None:
+        payload = json.dumps(job, ensure_ascii=False, separators=(",", ":"))
+        self._db.execute(
+            "INSERT INTO jobs(id, created_at, payload) VALUES(?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET created_at=excluded.created_at, payload=excluded.payload",
+            (job["id"], job["created_at"], payload),
+        )
+        self._db.commit()
+
+    def _restore_locked(self) -> None:
+        rows = self._db.execute(
+            "SELECT payload FROM jobs ORDER BY created_at DESC LIMIT 1000"
+        ).fetchall()
+        for (raw_payload,) in rows:
+            try:
+                job = json.loads(raw_payload)
+                if not isinstance(job, dict) or not isinstance(job.get("id"), str):
+                    continue
+                if job.get("status") in ACTIVE_STATUSES:
+                    job.update(
+                        status="failed",
+                        speed=None,
+                        eta=None,
+                        message="服务重启导致任务中断，可以点击重新下载。",
+                    )
+                    self._persist_locked(job)
+                self._jobs[job["id"]] = job
+                self._cancel[job["id"]] = threading.Event()
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
 
     def create(
         self,
@@ -121,23 +171,22 @@ class DownloadManager:
                 safe_thumbnail = None
 
         with self._lock:
-            active_count = sum(
-                item["status"] in {"queued", "downloading", "processing"}
-                for item in self._jobs.values()
-            )
+            active_count = sum(item["status"] in ACTIVE_STATUSES for item in self._jobs.values())
             if active_count >= 100:
                 raise ValueError("同时排队或下载的任务已达到 100 个上限。")
             if len(self._jobs) >= 1000:
                 finished = sorted(
                     (
                         (key, item) for key, item in self._jobs.items()
-                        if item["status"] in {"completed", "failed", "cancelled"}
+                        if item["status"] in TERMINAL_STATUSES
                     ),
                     key=lambda pair: pair[1]["created_at"],
                 )
                 for old_id, _ in finished[: max(0, len(self._jobs) - 899)]:
                     self._jobs.pop(old_id, None)
                     self._cancel.pop(old_id, None)
+                    self._db.execute("DELETE FROM jobs WHERE id = ?", (old_id,))
+
             job_id = uuid.uuid4().hex[:12]
             job = {
                 "id": job_id,
@@ -159,14 +208,18 @@ class DownloadManager:
             }
             self._jobs[job_id] = job
             self._cancel[job_id] = threading.Event()
+            self._persist_locked(job)
+            self._db.commit()
 
         self._executor.submit(self._run, job_id)
         return self._public(job)
 
     def _update(self, job_id: str, **changes: Any) -> None:
         with self._lock:
-            if job_id in self._jobs:
-                self._jobs[job_id].update(changes)
+            job = self._jobs.get(job_id)
+            if job:
+                job.update(changes)
+                self._persist_locked(job)
 
     def _run(self, job_id: str) -> None:
         with self._lock:
@@ -176,6 +229,7 @@ class DownloadManager:
                 return
             if cancel_event.is_set():
                 job.update(status="cancelled", message="已取消")
+                self._persist_locked(job)
                 return
             url = job["url"]
             quality = job["quality"]
@@ -247,13 +301,14 @@ class DownloadManager:
             event = self._cancel.get(job_id)
             if not job or not event:
                 return None
-            if job["status"] in {"completed", "failed", "cancelled"}:
+            if job["status"] in TERMINAL_STATUSES:
                 return self._public(job)
             event.set()
             if job["status"] == "queued":
                 job.update(status="cancelled", message="已取消")
             else:
                 job.update(message="正在停止下载…")
+            self._persist_locked(job)
             return self._public(job)
 
     def retry(self, job_id: str) -> dict[str, Any] | None:
