@@ -1,0 +1,12 @@
+services:
+  ytflow:
+    build: .
+    container_name: ytflow
+    restart: unless-stopped
+    ports:
+      # Keep the service local by default. Change only if you understand the security implications.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./downloads:/data/downloads
+    environment:
+      YTFLOW_WORKERS: "2"
