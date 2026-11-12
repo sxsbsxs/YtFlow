@@ -1,26 +1,42 @@
 from __future__ import annotations
 
+import secrets
+import threading
+import time
+from collections import defaultdict, deque
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from yt_dlp import YoutubeDL
 
 from app.downloads import DOWNLOAD_DIR, manager, validate_media_url
+from app.security import COOKIE_NAME, SessionAuth
 
 
 app = FastAPI(
     title="YtFlow",
-    version="0.1.0",
-    description="A local web video downloader powered by yt-dlp.",
+    version="0.2.0",
+    description="A self-hosted web video downloader powered by yt-dlp.",
 )
+auth = SessionAuth.from_env()
+
+LOGIN_WINDOW_SECONDS = 15 * 60
+LOGIN_MAX_FAILURES = 5
+_login_failures: dict[str, deque[float]] = defaultdict(deque)
+_login_lock = threading.Lock()
 
 
 class InspectRequest(BaseModel):
     url: str = Field(min_length=8, max_length=4096)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=256)
 
 
 class DownloadRequest(BaseModel):
@@ -33,9 +49,122 @@ class DownloadRequest(BaseModel):
     thumbnail: str | None = Field(default=None, max_length=4096)
 
 
+def _client_key(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _login_is_limited(client_key: str) -> bool:
+    now = time.monotonic()
+    with _login_lock:
+        attempts = _login_failures[client_key]
+        while attempts and now - attempts[0] > LOGIN_WINDOW_SECONDS:
+            attempts.popleft()
+        return len(attempts) >= LOGIN_MAX_FAILURES
+
+
+def _record_login_failure(client_key: str) -> None:
+    now = time.monotonic()
+    with _login_lock:
+        attempts = _login_failures[client_key]
+        while attempts and now - attempts[0] > LOGIN_WINDOW_SECONDS:
+            attempts.popleft()
+        attempts.append(now)
+
+
+def _clear_login_failures(client_key: str) -> None:
+    with _login_lock:
+        _login_failures.pop(client_key, None)
+
+
+@app.middleware("http")
+async def security_and_auth_middleware(request: Request, call_next):
+    path = request.url.path
+    public_api_paths = {"/api/health", "/api/auth/status", "/api/auth/login"}
+    if path.startswith("/api/") and path not in public_api_paths:
+        session = auth.read(request.cookies.get(COOKIE_NAME))
+        if session is None:
+            response = JSONResponse({"detail": "请先登录 YtFlow。"}, status_code=401)
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        request.state.ytflow_session = session
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            supplied_csrf = request.headers.get("x-csrf-token", "")
+            if not secrets.compare_digest(supplied_csrf, session["csrf"]):
+                response = JSONResponse({"detail": "安全令牌无效，请刷新页面后重试。"}, status_code=403)
+                response.headers["Cache-Control"] = "no-store"
+                return response
+
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; "
+        "form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self'",
+    )
+    if path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.get("/api/health")
 async def health():
     return {"ok": True, "name": "YtFlow", "version": app.version}
+
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request):
+    session = auth.read(request.cookies.get(COOKIE_NAME))
+    if not session:
+        return {"authenticated": False}
+    return {
+        "authenticated": True,
+        "username": session["sub"],
+        "csrf_token": session["csrf"],
+        "expires_at": session["exp"],
+    }
+
+
+@app.post("/api/auth/login")
+async def login(payload: LoginRequest, request: Request):
+    client_key = _client_key(request)
+    if _login_is_limited(client_key):
+        raise HTTPException(status_code=429, detail="登录尝试过多，请 15 分钟后再试。")
+    if not auth.verify_credentials(payload.username, payload.password):
+        _record_login_failure(client_key)
+        raise HTTPException(status_code=401, detail="用户名或密码错误。")
+
+    _clear_login_failures(client_key)
+    token, csrf_token = auth.issue()
+    response = JSONResponse({"ok": True, "csrf_token": csrf_token})
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        max_age=auth.config.session_ttl_seconds,
+        httponly=True,
+        secure=auth.config.cookie_secure,
+        samesite="strict",
+        path="/",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/api/auth/logout")
+async def logout():
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(
+        key=COOKIE_NAME,
+        path="/",
+        secure=auth.config.cookie_secure,
+        httponly=True,
+        samesite="strict",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.post("/api/inspect")

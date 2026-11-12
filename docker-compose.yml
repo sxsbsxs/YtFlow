@@ -3,13 +3,54 @@ services:
     build: .
     container_name: ytflow
     restart: unless-stopped
-    ports:
-      # Keep the service local by default. Change only if you understand the security implications.
-      - "127.0.0.1:8080:8080"
+    expose:
+      - "8080"
+    env_file:
+      - .env
+    environment:
+      YTFLOW_DOWNLOAD_DIR: /data/downloads
+      YTFLOW_WORKERS: ${YTFLOW_WORKERS:-2}
+      YTFLOW_COOKIE_SECURE: "true"
     volumes:
       - ytflow-downloads:/data/downloads
+    networks:
+      - ytflow-private
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: ytflow-caddy
+    restart: unless-stopped
+    depends_on:
+      ytflow:
+        condition: service_healthy
     environment:
-      YTFLOW_WORKERS: "2"
+      YTFLOW_DOMAIN: ${YTFLOW_DOMAIN:?Set YTFLOW_DOMAIN in .env to your domain}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - ytflow-private
 
 volumes:
   ytflow-downloads:
+  caddy-data:
+  caddy-config:
+
+networks:
+  ytflow-private:
+    driver: bridge

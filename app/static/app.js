@@ -26,11 +26,52 @@ function showToast(message) {
   clearTimeout(state.toastTimer);
   state.toastTimer = setTimeout(() => $("toast").classList.remove("show"), 2600);
 }
+let csrfToken = null;
+let refreshingAuth = false;
+
 async function api(path, options = {}) {
-  const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+  const method = (options.method || "GET").toUpperCase();
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(method) && csrfToken) {
+    headers["X-CSRF-Token"] = csrfToken;
+  }
+  const response = await fetch(path, { credentials: "same-origin", ...options, headers });
   const body = await response.json().catch(() => ({}));
+  if (response.status === 401 && !refreshingAuth) {
+    refreshingAuth = true;
+    showLogin("登录状态已过期，请重新登录。");
+    refreshingAuth = false;
+  }
   if (!response.ok) throw new Error(body.detail || "请求失败，请检查服务状态。");
   return body;
+}
+
+function showLogin(message = "") {
+  csrfToken = null;
+  $("app-shell").classList.add("hidden");
+  $("login-screen").classList.remove("hidden");
+  $("login-error").textContent = message;
+  $("login-error").classList.toggle("hidden", !message);
+}
+function showApp(username) {
+  $("login-screen").classList.add("hidden");
+  $("app-shell").classList.remove("hidden");
+  $("signed-user").textContent = username || "管理员";
+  refresh();
+  refreshFiles();
+}
+async function checkSession() {
+  try {
+    const status = await fetch("/api/auth/status", { credentials: "same-origin", cache: "no-store" }).then((r) => r.json());
+    if (status.authenticated) {
+      csrfToken = status.csrf_token;
+      showApp(status.username);
+    } else {
+      showLogin();
+    }
+  } catch (_) {
+    showLogin("无法连接到 YtFlow 服务，请检查服务器状态。");
+  }
 }
 function statusLabel(status) {
   return ({ queued: "排队中", downloading: "下载中", processing: "处理中", completed: "已完成", failed: "失败", cancelled: "已取消" })[status] || status;
@@ -113,6 +154,48 @@ $("download-form").addEventListener("submit", async (event) => {
     button.innerHTML = '<span>↓</span> 解析并添加任务';
   }
 });
+$("login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = $("login-button");
+  button.disabled = true;
+  button.textContent = "正在验证…";
+  $("login-error").classList.add("hidden");
+  try {
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: $("login-username").value.trim(),
+        password: $("login-password").value
+      })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.detail || "登录失败。");
+    $("login-password").value = "";
+    csrfToken = result.csrf_token;
+    const status = await fetch("/api/auth/status", { credentials: "same-origin", cache: "no-store" }).then((r) => r.json());
+    if (!status.authenticated) throw new Error("会话创建失败，请重新登录。");
+    csrfToken = status.csrf_token;
+    showApp(status.username);
+  } catch (error) {
+    $("login-error").textContent = error.message;
+    $("login-error").classList.remove("hidden");
+  } finally {
+    button.disabled = false;
+    button.innerHTML = '安全登录 <span>→</span>';
+  }
+});
+$("logout-button").addEventListener("click", async () => {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+    $("login-password").value = "";
+    showLogin("你已安全退出登录。");
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
 $("paste-button").addEventListener("click", async () => {
   try {
     $("url-input").value = await navigator.clipboard.readText();
@@ -174,7 +257,10 @@ async function refreshFiles() {
 }
 $("refresh-files").addEventListener("click", refreshFiles);
 if (localStorage.getItem("ytflow-theme") === "light") document.body.classList.add("light");
-refresh();
-refreshFiles();
-setInterval(refresh, 1800);
-setInterval(refreshFiles, 6000);
+checkSession();
+setInterval(() => {
+  if (!$("app-shell").classList.contains("hidden")) refresh();
+}, 1800);
+setInterval(() => {
+  if (!$("app-shell").classList.contains("hidden")) refreshFiles();
+}, 6000);

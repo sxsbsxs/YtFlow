@@ -2,7 +2,7 @@
 
 A modern, self-hosted web video downloader powered by [yt-dlp](https://github.com/yt-dlp/yt-dlp).
 
-YtFlow combines a clean IDM-inspired web interface with a Python/FastAPI backend and the yt-dlp media extraction engine.
+YtFlow combines an IDM-inspired web interface with a Python/FastAPI backend and the yt-dlp media extraction engine.
 
 > **Responsible use:** Download only content you own or are explicitly authorized to download. Follow the source website's terms and applicable copyright law. YtFlow does not bypass DRM or access controls.
 
@@ -12,79 +12,104 @@ YtFlow combines a clean IDM-inspired web interface with a Python/FastAPI backend
 - Download video at best available quality or cap quality at 4K, 1440p, 1080p, 720p, 480p, or 360p.
 - Extract audio to MP3, M4A, WAV, or Opus (FFmpeg required).
 - Download playlists when explicitly selected.
-- Track queued, downloading, processing, completed, failed, and cancelled jobs.
-- See live percentage, transfer speed, and estimated time remaining.
+- Live queue status, percentage, transfer speed, and ETA.
 - Cancel active jobs and retry failed/cancelled jobs.
+- Downloaded-file browser with persistent storage.
 - Dark/light interface themes.
-- Docker Compose deployment with a persistent downloads folder.
-- GitHub Actions CI for Python 3.11 and 3.12.
+- Administrator login with signed HttpOnly cookies, CSRF tokens, and failed-login throttling.
+- Caddy reverse proxy with automatic HTTPS certificates.
+- Docker Compose deployment; the app container is not directly published to the internet.
+- GitHub Actions checks Python 3.11/3.12, browser JavaScript, and the Docker image.
 
-## Quick start with Docker
+## Public deployment (recommended)
 
-Requirements: Docker Engine and the Docker Compose plugin.
+You need:
+- A Linux VPS/server with a public IPv4 address (2 GB RAM or more recommended).
+- A domain or subdomain whose DNS A record points to that server.
+- Inbound TCP ports **80** and **443** open in your VPS/cloud firewall.
+- Docker Engine and the Docker Compose plugin installed.
 
-```bash
-git clone https://github.com/sxsbsxs/YtFlow.git
-cd YtFlow
-docker compose up --build
-```
+### 1. Point your domain to the server
 
-Open **http://localhost:8080**.
+Create an A record such as `downloads.example.com` pointing to the server's public IPv4 address. If you have an AAAA record, it must point to the correct server IPv6 address; otherwise remove it. Caddy uses the domain to request and renew HTTPS certificates automatically.
 
-Downloaded media is stored in the persistent Docker volume `ytflow-downloads` and is available in the web UI under **已保存文件**. To copy the files out of the volume, run `docker compose cp ytflow:/data/downloads ./downloads`. The Compose port is intentionally bound to `127.0.0.1` so the web UI is not exposed to your network by default.
-
-Stop the service with:
-
-```bash
-docker compose down
-```
-
-## Run without Docker
-
-Requirements: Python 3.11 or later and FFmpeg available on your system PATH.
+### 2. Configure credentials
 
 ```bash
 git clone https://github.com/sxsbsxs/YtFlow.git
 cd YtFlow
+cp .env.example .env
+```
+
+Edit `.env` and set your real domain, email, and a unique administrator password. Generate a strong signing key:
+
+```bash
+openssl rand -hex 32
+```
+
+Paste the output into `YTFLOW_SECRET_KEY`. Do not commit or share `.env`.
+
+### 3. Start the public HTTPS service
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs -f caddy ytflow
+```
+
+Then visit **https://your-domain.example** and sign in with the administrator username/password from `.env`.
+
+The public entry point is Caddy on ports 80/443. The FastAPI container is only reachable on the private Docker network; it has no host-published port. Caddy obtains and renews TLS certificates automatically. The downloads and Caddy certificate data are kept in named Docker volumes.
+
+### 4. Update
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+### 5. Back up downloads and TLS state
+
+Back up Docker volumes `ytflow-downloads`, `caddy-data`, and `caddy-config`. Keep a separate secure backup of `.env`; losing `YTFLOW_SECRET_KEY` invalidates existing sessions.
+
+## Local development
+
+For local development without Caddy, use the same credentials but set `YTFLOW_COOKIE_SECURE=false` (only for localhost/HTTP). Example:
+
+```bash
 python -m venv .venv
-```
-
-Activate the environment:
-
-```bash
-# Linux / macOS
 source .venv/bin/activate
-
-# Windows PowerShell
-.venv\\Scripts\\Activate.ps1
-```
-
-Install and start:
-
-```bash
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
+export YTFLOW_ADMIN_USERNAME=admin
+export YTFLOW_ADMIN_PASSWORD='replace-with-a-long-local-password'
+export YTFLOW_SECRET_KEY="$(openssl rand -hex 32)"
+export YTFLOW_COOKIE_SECURE=false
 uvicorn app.main:app --host 127.0.0.1 --port 8080
 ```
 
-Open **http://127.0.0.1:8080**.
+On Windows PowerShell, set the same variables with `$env:NAME="value"`. Do not use the insecure-cookie setting on a public deployment.
 
 ## Configuration
 
-| Environment variable | Default | Description |
+| Variable | Required | Description |
 | --- | --- | --- |
-| `YTFLOW_DOWNLOAD_DIR` | `downloads` | Directory used to store downloaded files |
-| `YTFLOW_WORKERS` | `2` | Maximum concurrent download workers |
-
-Example:
-
-```bash
-YTFLOW_WORKERS=3 YTFLOW_DOWNLOAD_DIR=/data/media uvicorn app.main:app --host 127.0.0.1 --port 8080
-```
+| `YTFLOW_DOMAIN` | Public Docker deployment | Public hostname for Caddy |
+| `YTFLOW_ACME_EMAIL` | Public Docker deployment | Email for TLS certificate registration |
+| `YTFLOW_ADMIN_USERNAME` | Yes | Single administrator username |
+| `YTFLOW_ADMIN_PASSWORD` | Yes | Administrator password (minimum 12 characters; use 16+ random characters) |
+| `YTFLOW_SECRET_KEY` | Yes | Random signing secret (minimum 32 characters) |
+| `YTFLOW_SESSION_TTL_SECONDS` | No | Session lifetime, 300 to 604800 seconds (default 86400) |
+| `YTFLOW_COOKIE_SECURE` | No | Secure cookie flag (default true) |
+| `YTFLOW_WORKERS` | No | Concurrent download workers (default 2) |
+| `YTFLOW_DOWNLOAD_DIR` | No | Download directory (Docker sets this to `/data/downloads`) |
 
 ## API
 
-- `GET /api/health` — health check
-- `POST /api/inspect` — inspect a media URL
+- `GET /api/health` — public health check
+- `GET /api/auth/status` — session status and CSRF token for the signed-in browser
+- `POST /api/auth/login` — authenticate administrator
+- `POST /api/auth/logout` — end the current browser session
+- `POST /api/inspect` — inspect a media URL (authenticated)
 - `GET /api/downloads` — list jobs
 - `POST /api/downloads` — create a job
 - `GET /api/downloads/{id}` — get a job
@@ -93,7 +118,7 @@ YTFLOW_WORKERS=3 YTFLOW_DOWNLOAD_DIR=/data/media uvicorn app.main:app --host 127
 - `GET /api/files` — list downloaded files
 - `GET /api/files/{filename}` — retrieve a downloaded file
 
-Interactive API documentation is available at **/docs**.
+All API routes except health, auth status, and login require a valid session. Mutating API requests also require the session's `X-CSRF-Token` header. Interactive API documentation is available at `/docs`, but protected operations still require authentication.
 
 ## Development and tests
 
@@ -102,13 +127,15 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-GitHub Actions runs the test suite on Python 3.11 and 3.12 for pushes and pull requests to `main`.
-
 ## Security notes
 
-YtFlow is designed for trusted, local use. It does not currently provide user authentication or multi-user access control. Do not expose it directly to the public internet. Before any remote deployment, put it behind authentication and HTTPS, restrict network access, and apply rate limits. The URL validator rejects non-HTTP(S) schemes and obvious localhost/private-IP targets, but it is not a substitute for network-level egress controls.
-
-Job metadata is held in memory and is cleared when the server restarts. Downloaded files remain in the configured downloads directory.
+- Use a dedicated VPS and keep the host OS, Docker, and images updated.
+- Keep SSH key-only where possible and enable your provider's firewall. Only expose TCP 80/443 publicly (and SSH from trusted IPs); do not publish port 8080.
+- The app has one shared administrator account, not multi-user accounts or role-based access.
+- Login failures are throttled per client address in the application process. For high-exposure deployments, also configure provider-level or reverse-proxy rate limiting.
+- YtFlow accepts HTTP(S) URLs and rejects obvious local/private IP literals. This is not a complete SSRF defense against DNS rebinding or malicious redirects. Restrict outbound network access at the host/firewall layer if the service will be used by untrusted users.
+- Download job metadata is currently held in memory and is cleared when the app restarts. Downloaded media persists in its Docker volume.
+- Do not expose the app directly to the internet or disable authentication.
 
 ## License
 
