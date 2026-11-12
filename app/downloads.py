@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -105,6 +106,7 @@ class DownloadManager:
         self._lock = threading.RLock()
         self._jobs: dict[str, dict[str, Any]] = {}
         self._cancel: dict[str, threading.Event] = {}
+        self._last_persist: dict[str, float] = {}
         self._db_path = Path(db_path) if db_path else DOWNLOAD_DIR / ".ytflow.sqlite3"
         self._db_path.expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(str(self._db_path), check_same_thread=False, timeout=30)
@@ -127,6 +129,7 @@ class DownloadManager:
             (job["id"], job["created_at"], payload),
         )
         self._db.commit()
+        self._last_persist[job["id"]] = time.monotonic()
 
     def _restore_locked(self) -> None:
         rows = self._db.execute(
@@ -218,8 +221,16 @@ class DownloadManager:
         with self._lock:
             job = self._jobs.get(job_id)
             if job:
+                previous_status = job.get("status")
                 job.update(changes)
-                self._persist_locked(job)
+                now = time.monotonic()
+                status = job.get("status")
+                if (
+                    status != "downloading"
+                    or previous_status != "downloading"
+                    or now - self._last_persist.get(job_id, 0.0) >= 1.0
+                ):
+                    self._persist_locked(job)
 
     def _run(self, job_id: str) -> None:
         with self._lock:
