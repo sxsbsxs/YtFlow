@@ -35,6 +35,7 @@ services:
         condition: service_healthy
     environment:
       YTFLOW_DOMAIN: ${YTFLOW_DOMAIN:?Set YTFLOW_DOMAIN in .env to your domain}
+      YTFLOW_ACME_EMAIL: ${YTFLOW_ACME_EMAIL:?Set YTFLOW_ACME_EMAIL in .env}
     ports:
       - "80:80"
       - "443:443"
