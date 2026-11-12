@@ -152,6 +152,29 @@ $("theme-toggle").addEventListener("click", () => {
   document.body.classList.toggle("light");
   localStorage.setItem("ytflow-theme", document.body.classList.contains("light") ? "light" : "dark");
 });
+async function refreshFiles() {
+  try {
+    const data = await api("/api/files");
+    const items = data.items || [];
+    $("file-count").textContent = items.length;
+    if (!items.length) {
+      $("files-list").innerHTML = '<div class="files-empty">下载完成的文件会显示在这里。</div>';
+      return;
+    }
+    $("files-list").innerHTML = items.map((file) => {
+      const href = "/api/files/" + encodeURIComponent(file.name);
+      const modified = file.modified ? new Date(file.modified * 1000).toLocaleString() : "";
+      return '<article class="file-row"><div class="file-info"><div class="file-name" title="' + escapeHtml(file.name) + '">' +
+        escapeHtml(file.name) + '</div><div class="file-meta">' + formatBytes(file.size) + (modified ? " · " + escapeHtml(modified) : "") +
+        '</div></div><a class="file-download" href="' + href + '" download>下载文件 ↓</a></article>';
+    }).join("");
+  } catch (error) {
+    $("files-list").innerHTML = '<div class="files-empty">暂时无法读取文件列表。</div>';
+  }
+}
+$("refresh-files").addEventListener("click", refreshFiles);
 if (localStorage.getItem("ytflow-theme") === "light") document.body.classList.add("light");
 refresh();
+refreshFiles();
 setInterval(refresh, 1800);
+setInterval(refreshFiles, 6000);

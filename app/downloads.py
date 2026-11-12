@@ -121,8 +121,23 @@ class DownloadManager:
                 safe_thumbnail = None
 
         with self._lock:
-            if len(self._jobs) >= 100:
-                raise ValueError("任务数量已达到上限，请先清理任务。")
+            active_count = sum(
+                item["status"] in {"queued", "downloading", "processing"}
+                for item in self._jobs.values()
+            )
+            if active_count >= 100:
+                raise ValueError("同时排队或下载的任务已达到 100 个上限。")
+            if len(self._jobs) >= 1000:
+                finished = sorted(
+                    (
+                        (key, item) for key, item in self._jobs.items()
+                        if item["status"] in {"completed", "failed", "cancelled"}
+                    ),
+                    key=lambda pair: pair[1]["created_at"],
+                )
+                for old_id, _ in finished[: max(0, len(self._jobs) - 899)]:
+                    self._jobs.pop(old_id, None)
+                    self._cancel.pop(old_id, None)
             job_id = uuid.uuid4().hex[:12]
             job = {
                 "id": job_id,
