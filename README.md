@@ -31,7 +31,7 @@ docker compose up --build
 
 Open **http://localhost:8080**.
 
-Downloaded media is stored in the local `./downloads` folder. The Compose port is intentionally bound to `127.0.0.1` so the web UI is not exposed to your network by default.
+Downloaded media is stored in the persistent Docker volume `ytflow-downloads` and is available in the web UI under **已保存文件**. To copy the files out of the volume, run `docker compose cp ytflow:/data/downloads ./downloads`. The Compose port is intentionally bound to `127.0.0.1` so the web UI is not exposed to your network by default.
 
 Stop the service with:
 

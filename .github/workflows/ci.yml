@@ -35,3 +35,13 @@ jobs:
         run: node --check app/static/app.js
       - name: Run tests
         run: python -m pytest -q
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Validate Docker Compose
+        run: docker compose config --quiet
+      - name: Build Docker image
+        run: docker build --tag ytflow:ci .

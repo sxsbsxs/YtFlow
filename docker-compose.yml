@@ -7,6 +7,9 @@ services:
       # Keep the service local by default. Change only if you understand the security implications.
       - "127.0.0.1:8080:8080"
     volumes:
-      - ./downloads:/data/downloads
+      - ytflow-downloads:/data/downloads
     environment:
       YTFLOW_WORKERS: "2"
+
+volumes:
+  ytflow-downloads:
