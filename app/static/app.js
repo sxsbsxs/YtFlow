@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { items: [], filter: "all", busy: false, toastTimer: null };
+const state = { items: [], filter: "all", toastTimer: null };
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -79,31 +79,11 @@ async function refresh() {
     showToast(error.message);
   }
 }
-async function inspectUrl() {
-  const url = $("url-input").value.trim();
-  if (!url) throw new Error("请先粘贴视频链接。");
-  $("add-button").disabled = true;
-  $("add-button").innerHTML = '<span>◌</span> 正在解析…';
-  $("form-error").classList.add("hidden");
-  try {
-    const info = await api("/api/inspect", { method: "POST", body: JSON.stringify({ url }) });
-    $("preview-title").textContent = info.title || "媒体信息已读取";
-    $("preview-subtitle").textContent = [info.uploader, info.duration ? Math.floor(info.duration / 60) + " 分钟" : null,
-      info.qualities && info.qualities.length ? "最高检测到 " + info.qualities[0] + "p" : null].filter(Boolean).join(" · ");
-    if (info.thumbnail) { $("preview-image").src = info.thumbnail; $("preview-image").classList.remove("hidden"); }
-    else { $("preview-image").src = ""; $("preview-image").classList.add("hidden"); }
-    $("preview-card").classList.remove("hidden");
-    return true;
-  } finally {
-    $("add-button").disabled = false;
-    $("add-button").innerHTML = '<span>↓</span> 解析并添加任务';
-  }
-}
 $("download-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = $("add-button");
   button.disabled = true;
-  button.innerHTML = '<span>◌</span> 正在创建任务…';
+  button.innerHTML = '<span>◌</span> 正在解析…';
   $("form-error").classList.add("hidden");
   try {
     const payload = {
@@ -113,15 +93,14 @@ $("download-form").addEventListener("submit", async (event) => {
       audio_format: $("audio-select").value,
       playlist: $("playlist-select").value === "true"
     };
-    // Inspect first so an invalid URL or unavailable media is caught before queuing.
     const info = await api("/api/inspect", { method: "POST", body: JSON.stringify({ url: payload.url }) });
+    payload.title = info.title || payload.url;
+    payload.thumbnail = info.thumbnail || null;
     const job = await api("/api/downloads", { method: "POST", body: JSON.stringify(payload) });
-    job.title = info.title || job.title;
-    job.thumbnail = info.thumbnail || null;
     state.items.unshift(job);
     $("preview-card").classList.add("hidden");
     $("url-input").value = "";
-    $("filter-tabs").querySelectorAll(".filter-tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.filter === "all"));
+    document.querySelectorAll("[data-filter]").forEach((tab) => tab.classList.toggle("active", tab.dataset.filter === "all"));
     state.filter = "all";
     render();
     showToast("下载任务已添加");
@@ -160,16 +139,12 @@ $("task-list").addEventListener("click", async (event) => {
     catch (error) { showToast(error.message); }
   }
   if (retryId) {
-    const old = state.items.find((item) => item.id === retryId);
-    if (!old) return;
     try {
-      const created = await api("/api/downloads", { method: "POST", body: JSON.stringify({
-        url: old.url || "", quality: old.quality, mode: old.mode, audio_format: old.audio_format, playlist: old.playlist
-      }) });
+      await api("/api/downloads/" + encodeURIComponent(retryId) + "/retry", { method: "POST" });
       showToast("已创建重试任务");
       await refresh();
-    } catch (_) {
-      showToast("重试时无法读取原链接，请重新粘贴链接创建任务。");
+    } catch (error) {
+      showToast(error.message);
     }
   }
 });

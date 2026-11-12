@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from yt_dlp import YoutubeDL
 
-from app.downloads import AUDIO_FORMATS, DOWNLOAD_DIR, manager, validate_media_url
+from app.downloads import DOWNLOAD_DIR, manager, validate_media_url
 
 
 app = FastAPI(
@@ -29,6 +29,8 @@ class DownloadRequest(BaseModel):
     mode: Literal["video", "audio"] = "video"
     audio_format: Literal["mp3", "m4a", "wav", "opus"] = "mp3"
     playlist: bool = False
+    title: str | None = Field(default=None, max_length=240)
+    thumbnail: str | None = Field(default=None, max_length=4096)
 
 
 @app.get("/api/health")
@@ -40,9 +42,11 @@ async def health():
 async def inspect_media(request: InspectRequest):
     try:
         url = validate_media_url(request.url)
+
         def extract():
             with YoutubeDL({"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True}) as ydl:
                 return ydl.extract_info(url, download=False)
+
         info = await run_in_threadpool(extract)
         if not isinstance(info, dict):
             raise ValueError("无法读取该链接的媒体信息。")
@@ -75,9 +79,22 @@ async def create_download(request: DownloadRequest):
             mode=request.mode,
             audio_format=request.audio_format,
             playlist=request.playlist,
+            title=request.title,
+            thumbnail=request.thumbnail,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/downloads/{job_id}/retry", status_code=202)
+async def retry_download(job_id: str):
+    try:
+        job = manager.retry(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not job:
+        raise HTTPException(status_code=404, detail="找不到该下载任务。")
+    return job
 
 
 @app.get("/api/downloads/{job_id}")
@@ -108,7 +125,6 @@ async def list_files():
 
 @app.get("/api/files/{filename}")
 async def download_file(filename: str):
-    # Only serve direct children of the configured download directory.
     target = (DOWNLOAD_DIR / filename).resolve()
     if target.parent != DOWNLOAD_DIR or not target.is_file():
         raise HTTPException(status_code=404, detail="文件不存在。")

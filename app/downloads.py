@@ -5,6 +5,7 @@ import os
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -106,10 +107,18 @@ class DownloadManager:
         mode: str = "video",
         audio_format: str = "mp3",
         playlist: bool = False,
+        title: str | None = None,
+        thumbnail: str | None = None,
     ) -> dict[str, Any]:
         safe_url = validate_media_url(url)
-        # Validate options before accepting a job.
         build_ydl_options(quality=quality, mode=mode, audio_format=audio_format, playlist=playlist)
+
+        safe_thumbnail = None
+        if thumbnail:
+            try:
+                safe_thumbnail = validate_media_url(thumbnail)
+            except ValueError:
+                safe_thumbnail = None
 
         with self._lock:
             if len(self._jobs) >= 100:
@@ -118,8 +127,8 @@ class DownloadManager:
             job = {
                 "id": job_id,
                 "url": safe_url,
-                "title": safe_url,
-                "thumbnail": None,
+                "title": (title or safe_url)[:240],
+                "thumbnail": safe_thumbnail,
                 "status": "queued",
                 "progress": 0.0,
                 "speed": None,
@@ -131,7 +140,7 @@ class DownloadManager:
                 "mode": mode,
                 "audio_format": audio_format,
                 "playlist": playlist,
-                "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
             self._jobs[job_id] = job
             self._cancel[job_id] = threading.Event()
@@ -180,7 +189,14 @@ class DownloadManager:
                     message="正在下载",
                 )
             elif state == "finished":
-                self._update(job_id, status="processing", progress=99.9, speed=None, eta=None, message="下载完成，正在处理文件")
+                self._update(
+                    job_id,
+                    status="processing",
+                    progress=99.9,
+                    speed=None,
+                    eta=None,
+                    message="下载完成，正在处理文件",
+                )
 
         options = build_ydl_options(
             quality=quality,
@@ -191,11 +207,6 @@ class DownloadManager:
         )
         try:
             with YoutubeDL(options) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if isinstance(info, dict):
-                    title = info.get("title") or info.get("playlist_title") or url
-                    thumbnail = info.get("thumbnail")
-                    self._update(job_id, title=str(title)[:240], thumbnail=thumbnail)
                 if cancel_event.is_set():
                     raise DownloadError("Download cancelled by user")
                 ydl.download([url])
@@ -203,11 +214,17 @@ class DownloadManager:
                 self._update(job_id, status="cancelled", message="已取消", speed=None, eta=None)
             else:
                 self._update(job_id, status="completed", progress=100.0, message="下载完成", speed=None, eta=None)
-        except Exception as exc:  # yt-dlp surfaces site-specific errors through several exception types
+        except Exception as exc:
             if cancel_event.is_set() or "cancelled by user" in str(exc).lower():
                 self._update(job_id, status="cancelled", message="已取消", speed=None, eta=None)
             else:
-                self._update(job_id, status="failed", message=(str(exc).strip() or "下载失败")[:320], speed=None, eta=None)
+                self._update(
+                    job_id,
+                    status="failed",
+                    message=(str(exc).strip() or "下载失败")[:320],
+                    speed=None,
+                    eta=None,
+                )
 
     def cancel(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -224,6 +241,24 @@ class DownloadManager:
                 job.update(message="正在停止下载…")
             return self._public(job)
 
+    def retry(self, job_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            old = self._jobs.get(job_id)
+            if not old:
+                return None
+            if old["status"] not in {"failed", "cancelled"}:
+                raise ValueError("只有失败或已取消的任务才能重试。")
+            retry_data = {
+                "url": old["url"],
+                "quality": old["quality"],
+                "mode": old["mode"],
+                "audio_format": old["audio_format"],
+                "playlist": old["playlist"],
+                "title": old["title"],
+                "thumbnail": old["thumbnail"],
+            }
+        return self.create(**retry_data)
+
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -236,7 +271,8 @@ class DownloadManager:
 
     @staticmethod
     def _public(job: dict[str, Any]) -> dict[str, Any]:
-        return {key: value for key, value in job.items() if key not in {"url"}}
+        # Keep source URLs private in list responses; retry uses the server-side job record.
+        return {key: value for key, value in job.items() if key != "url"}
 
 
 manager = DownloadManager(workers=int(os.getenv("YTFLOW_WORKERS", "2")))

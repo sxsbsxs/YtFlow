@@ -32,4 +32,4 @@ jobs:
       - name: Compile
         run: python -m compileall -q app
       - name: Run tests
-        run: pytest -q
+        run: python -m pytest -q
