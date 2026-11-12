@@ -37,10 +37,10 @@ class AuthConfig:
         secret = os.getenv("YTFLOW_SECRET_KEY", "")
         if not username:
             raise RuntimeError("YTFLOW_ADMIN_USERNAME is required. Copy .env.example to .env and configure it.")
-        if len(password) < 12:
-            raise RuntimeError("YTFLOW_ADMIN_PASSWORD must be at least 12 characters long.")
-        if len(secret) < 32:
-            raise RuntimeError("YTFLOW_SECRET_KEY must contain at least 32 characters. Generate one with: openssl rand -hex 32")
+        if len(password) < 12 or password.startswith("CHANGE_THIS"):
+            raise RuntimeError("Set a unique YTFLOW_ADMIN_PASSWORD of at least 12 characters in .env; the example placeholder is not accepted.")
+        if len(secret) < 32 or secret.startswith("REPLACE_WITH"):
+            raise RuntimeError("Set YTFLOW_SECRET_KEY to a random value of at least 32 characters. Generate one with: openssl rand -hex 32")
         try:
             ttl = int(os.getenv("YTFLOW_SESSION_TTL_SECONDS", "86400"))
         except ValueError as exc:

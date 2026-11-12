@@ -1,3 +1,5 @@
+import pytest
+
 import time
 
 from app.security import AuthConfig, SessionAuth
@@ -48,3 +50,10 @@ def test_session_is_bound_to_configured_username():
     auth = make_auth()
     token, _ = auth.issue(username="someone-else", now=1000)
     assert auth.read(token, now=1001) is None
+
+def test_example_placeholders_are_rejected(monkeypatch):
+    monkeypatch.setenv("YTFLOW_ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("YTFLOW_ADMIN_PASSWORD", "CHANGE_THIS_TO_A_LONG_RANDOM_PASSWORD")
+    monkeypatch.setenv("YTFLOW_SECRET_KEY", "REPLACE_WITH_OUTPUT_OF_OPENSSL_RAND_HEX_32")
+    with pytest.raises(RuntimeError):
+        AuthConfig.from_env()
